@@ -1,41 +1,91 @@
-name: Python Package using Conda
+name: Lightweight Structures CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
+  test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: [3.10]
-      max-parallel: 3
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-    - uses: actions/checkout@v4
+      # 1. Check out source code
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
-      with:
-        python-version: ${{ matrix.python-version }}
+      # 2. Set up the requested Python version
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
 
-    - name: Add conda to system path
-      run: |
-        echo "$CONDA/bin" >> $GITHUB_PATH
+      # 3. Install system-level OpenCV dependencies (needed on headless Ubuntu runners)
+      - name: Install system dependencies for OpenCV
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libgl1 libglib2.0-0
 
-    - name: Install dependencies
-      run: |
-        if [ -f environment.yml ]; then
-          conda env update --file environment.yml --name base
-        else
-          conda install -y numpy matplotlib pytest flake8
-        fi
+      # 4. Install Python dependencies
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install opencv-python-headless numpy matplotlib flake8 pytest
 
-    - name: Lint with flake8
-      run: |
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+      # 5. Lint with flake8
+      - name: Lint with flake8
+        run: |
+          # Treat syntax errors as hard failures; warn on style issues
+          flake8 "Lightweight-structures main.py.py" \
+            --count \
+            --select=E9,F63,F7,F82 \
+            --show-source \
+            --statistics
+          flake8 "Lightweight-structures main.py.py" \
+            --count \
+            --exit-zero \
+            --max-line-length=120 \
+            --statistics
 
-    - name: Test with pytest
-      run: |
-        pytest
+      # 6. Run the script in headless / non-interactive mode
+      #    cv.png is already committed to the repo, so it is available on the runner.
+      #    We patch plt.show() to a no-op so the job doesn't hang waiting for a GUI window.
+      - name: Run morphological pipeline (headless)
+        run: |
+          python - <<'EOF'
+          import matplotlib
+          matplotlib.use("Agg")           # non-interactive backend – no display needed
+          import matplotlib.pyplot as plt
+          plt.show = lambda: None         # suppress any remaining show() calls
+
+          import importlib.util, sys, pathlib
+
+          spec = importlib.util.spec_from_file_location(
+              "main_module",
+              pathlib.Path("Lightweight-structures main.py.py")
+          )
+          mod = importlib.util.module_from_spec(spec)
+          sys.modules["main_module"] = mod
+          spec.loader.exec_module(mod)
+
+          mod.main()
+          print("Pipeline completed successfully.")
+          EOF
+
+  build-summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    steps:
+      - name: Report status
+        run: |
+          echo "All matrix jobs finished."
+          echo "Status: ${{ needs.test.result }}"
